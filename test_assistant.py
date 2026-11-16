@@ -2,12 +2,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from assistant import (
     COMMANDS,
     CommandResult,
     HardwareInspector,
+    OllamaError,
+    OllamaToolAssistant,
     answer_question,
     parse_dmi_memory,
     parse_free,
@@ -17,6 +19,21 @@ from assistant import (
     parse_meminfo,
     run_allowlisted_command,
 )
+
+
+class FakeOllamaResponse:
+    def __init__(self, payload):
+        self.body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        _ = exc_type, exc_value, traceback
+        return False
+
+    def read(self, limit):
+        return self.body[:limit]
 
 
 class ParserTests(unittest.TestCase):
@@ -174,6 +191,123 @@ class AssistantTests(unittest.TestCase):
         self.assertIn("Example GPU", gpu)
         self.assertIn("NVMe", storage)
         self.assertEqual(calls, ["pci", "storage"])
+
+
+class OllamaToolTests(unittest.TestCase):
+    def test_valid_tool_call_runs_only_the_selected_inspector_and_uses_its_result(self):
+        inspector = Mock(spec=HardwareInspector)
+        inspector.memory.return_value = {"total": 16 * 1024**3, "available": 8 * 1024**3}
+        responses = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "get_memory_info",
+                                "arguments": {},
+                            }
+                        }
+                    ],
+                }
+            },
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "This system has 16 GiB of RAM.",
+                }
+            },
+        ]
+        requests = []
+        timeouts = []
+
+        def fake_open(request, timeout):
+            requests.append(json.loads(request.data))
+            timeouts.append(timeout)
+            return FakeOllamaResponse(responses.pop(0))
+
+        with patch("assistant.LOCAL_OLLAMA_OPENER.open", side_effect=fake_open):
+            answer = OllamaToolAssistant().ask("How much RAM do I have?", inspector)
+
+        self.assertEqual(answer, "This system has 16 GiB of RAM.")
+        self.assertEqual(timeouts, [90, 90])
+        inspector.memory.assert_called_once_with()
+        inspector.cpu.assert_not_called()
+        self.assertEqual(
+            [tool["function"]["name"] for tool in requests[0]["tools"]],
+            [
+                "get_cpu_info",
+                "get_memory_info",
+                "get_memory_topology",
+                "get_storage_devices",
+                "get_graphics_devices",
+            ],
+        )
+        tool_messages = [
+            message
+            for message in requests[1]["messages"]
+            if message["role"] == "tool"
+        ]
+        self.assertEqual(tool_messages[0]["tool_name"], "get_memory_info")
+        self.assertEqual(
+            json.loads(tool_messages[0]["content"]),
+            {"total": 16 * 1024**3, "available": 8 * 1024**3},
+        )
+
+    def test_unknown_tool_is_rejected_without_inspecting_hardware(self):
+        inspector = Mock(spec=HardwareInspector)
+        response = FakeOllamaResponse(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "run_shell_command",
+                                "arguments": {"command": "id"},
+                            }
+                        }
+                    ],
+                }
+            }
+        )
+
+        with patch("assistant.LOCAL_OLLAMA_OPENER.open", return_value=response):
+            with self.assertRaisesRegex(OllamaError, "unapproved inspection tool"):
+                OllamaToolAssistant().ask("Check my system", inspector)
+
+        self.assertEqual(inspector.method_calls, [])
+
+    def test_tool_arguments_are_rejected_without_inspecting_hardware(self):
+        inspector = Mock(spec=HardwareInspector)
+        response = FakeOllamaResponse(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "get_cpu_info",
+                                "arguments": {"command": "id"},
+                            }
+                        }
+                    ],
+                }
+            }
+        )
+
+        with patch("assistant.LOCAL_OLLAMA_OPENER.open", return_value=response):
+            with self.assertRaisesRegex(OllamaError, "does not accept arguments"):
+                OllamaToolAssistant().ask("Check my CPU", inspector)
+
+        self.assertEqual(inspector.method_calls, [])
+
+    def test_ollama_endpoint_must_be_loopback(self):
+        with self.assertRaisesRegex(ValueError, "local Ollama"):
+            OllamaToolAssistant(endpoint="http://example.com/api/chat")
 
 
 if __name__ == "__main__":
