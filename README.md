@@ -12,10 +12,11 @@ Requires Python 3.10 or later, Linux, and a local Ollama installation with a
 tool-calling-capable model.
 
 ```bash
-cd project-2-linux-hardware-assistant
 ollama pull qwen3
 python3 assistant.py
 ```
+
+Run these commands from the repository root.
 
 Ask questions such as “How much RAM do I have?”, “Can I add more RAM?”, “Is my
 SSD NVMe?”, “What CPU do I have?”, or “What GPU do I have?”. Type `quit` to exit.
@@ -62,6 +63,8 @@ equate every SSD with NVMe.
 * Hardware and firmware reporting varies by kernel, distribution, permissions,
   and installed utilities. Missing tools or fields produce an explicit
   unknown/unavailable response.
+* In WSL or a virtual machine, reported values describe the environment visible
+  to Linux and may not match the physical host's hardware.
 * A reported empty slot and board maximum are firmware data, not a guarantee of
   physical compatibility. Check the laptop model's service manual before
   purchasing memory.
